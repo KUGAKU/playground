@@ -59,6 +59,81 @@ SL_WEAK void app_process_action(void)
   /////////////////////////////////////////////////////////////////////////////
 }
 
+typedef struct {
+  uint16_t connection_handle;
+  uint16_t characteristic_handle;
+} ble_stack_session_t;
+
+typedef enum {
+  ACP_SERVICE_EVT__CONNECT = 0,
+  ACP_SERVICE_EVT__MTU_EXCHANGE,
+  ACP_SERVICE_EVT__DISCONNECT,
+  ACP_SERVICE_EVT__WRITE,
+  ACP_SERVICE_EVT__TX_COMPLETE
+} acp_service__evt_id_t;
+
+typedef struct {
+  uint8_t reserve;
+} acp_service__gap_evt_t;
+
+typedef struct {
+  uint16_t client_rx_mtu;
+} acp_service__gatts_evt_mtu_exchange_t;
+
+typedef struct {
+  uint16_t len;
+  uint8_t* p_data;
+} acp_service__gatts_evt_write_t;
+
+typedef struct {
+  union {
+    acp_service__gatts_evt_mtu_exchange_t mtu_exchange;
+    acp_service__gatts_evt_write_t write;
+  } gatts_params;
+} acp_service__gatts_evt_t;
+
+typedef struct {
+  uint16_t conn_handle;
+  acp_service__evt_id_t evt_id;
+  union {
+    acp_service__gap_evt_t gap_evt;
+    acp_service__gatts_evt_t gatts_evt;
+  } params;
+} acp_service__evt_t;
+
+typedef void (*ble_stack__event_callback_t)(acp_service__evt_t* p_ble_evt,
+                                            void* p_context);
+
+static ble_stack_session_t s_ble_stack_session[SL_BT_CONFIG_MAX_CONNECTIONS];
+static ble_stack__event_callback_t s_ble_stack__event_callback;
+
+static void session_update_characteristic(uint16_t conn_handle,
+                                          uint16_t new_characteristic_handle) {
+  for (int i = 0; i < SL_BT_CONFIG_MAX_CONNECTIONS; i++) {
+    if (s_ble_stack_session[i].connection_handle != conn_handle) {
+      continue;
+    }
+    s_ble_stack_session[i].characteristic_handle = new_characteristic_handle;
+    return;
+  }
+}
+
+static void on_ble_gatt_status(sl_bt_evt_gatt_server_characteristic_status_t* p_evt) {
+  session_update_characteristic(p_evt->connection, p_evt->characteristic);
+  return;
+}
+
+
+static void on_ble_write(sl_bt_evt_gatt_server_attribute_value_t* p_evt) {
+  acp_service__evt_t evt = {
+      .conn_handle = p_evt->connection,
+      .evt_id = ACP_SERVICE_EVT__WRITE,
+      .params.gatts_evt.gatts_params.write.p_data = p_evt->value.data,
+      .params.gatts_evt.gatts_params.write.len = p_evt->value.len,
+  };
+  s_ble_stack__event_callback(&evt, NULL);
+}
+
 /**************************************************************************//**
  * Bluetooth stack event handler.
  * This overrides the dummy weak implementation.
@@ -123,6 +198,17 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
     case sl_bt_evt_connection_opened_id:
       break;
 
+    case sl_bt_evt_connection_parameters_id:
+    break;
+
+    case sl_bt_evt_gatt_server_attribute_value_id:
+      on_ble_write(&evt->data.evt_gatt_server_attribute_value);
+      break;
+
+    case sl_bt_evt_gatt_server_characteristic_status_id:
+      on_ble_gatt_status(&evt->data.evt_gatt_server_characteristic_status);
+    break;
+
     // -------------------------------
     // This event indicates that a connection was closed.
     case sl_bt_evt_connection_closed_id:
@@ -133,10 +219,6 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         advertiser_connectable_scannable);
       app_assert_status(sc);
       break;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Add additional event handlers here as your application requires!      //
-    ///////////////////////////////////////////////////////////////////////////
 
     // -------------------------------
     // Default event handler.
