@@ -33,6 +33,8 @@
 #include "gatt_db.h"
 #include "app.h"
 
+#define INVALID_HANDLE 0xFFFF
+
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle = 0xff;
 
@@ -106,6 +108,10 @@ typedef void (*ble_stack__event_callback_t)(acp_service__evt_t* p_ble_evt,
 
 static ble_stack_session_t s_ble_stack_session[SL_BT_CONFIG_MAX_CONNECTIONS];
 static ble_stack__event_callback_t s_ble_stack__event_callback;
+static uint8_t s_connection_cnt = 0;
+
+static uint8_t ch_connection;
+static uint16_t ch_characteristic;
 
 static void session_update_characteristic(uint16_t conn_handle,
                                           uint16_t new_characteristic_handle) {
@@ -119,19 +125,63 @@ static void session_update_characteristic(uint16_t conn_handle,
 }
 
 static void on_ble_gatt_status(sl_bt_evt_gatt_server_characteristic_status_t* p_evt) {
-  session_update_characteristic(p_evt->connection, p_evt->characteristic);
+  size_t value_len = 1;
+  uint8_t value = 255;
+  sl_status_t status = sl_bt_gatt_server_send_notification(
+      ch_connection,
+      ch_characteristic,
+      value_len,
+      &value
+  );
   return;
+}
+
+static uint16_t get_session_characteristic_handle(uint16_t conn_handle) {
+  for (int i = 0; i < SL_BT_CONFIG_MAX_CONNECTIONS; i++) {
+    if (s_ble_stack_session[i].connection_handle != conn_handle) {
+      continue;
+    }
+    return s_ble_stack_session[i].characteristic_handle;
+  }
+  return INVALID_HANDLE;
+}
+
+static void session_update_new_session(uint16_t conn_handle) {
+  for (int i = 0; i < SL_BT_CONFIG_MAX_CONNECTIONS; i++) {
+    if (s_ble_stack_session[i].connection_handle == conn_handle) {
+      return;
+    }
+    if (s_ble_stack_session[i].connection_handle != INVALID_HANDLE) {
+      continue;
+    }
+    s_ble_stack_session[i].connection_handle = conn_handle;
+    s_connection_cnt++;
+    return;
+  }
+}
+
+static void on_ble_connect_connection_params(
+    sl_bt_evt_connection_parameters_t* p_evt) {
+
+  session_update_new_session(p_evt->connection);
+
+  acp_service__evt_t evt = {
+      .conn_handle = p_evt->connection,
+      .evt_id = ACP_SERVICE_EVT__CONNECT,
+  };
+  s_ble_stack__event_callback(&evt, NULL);
+
+  // 同時接続数上限に満たしてないから、Advertise 再開するとかここで出来そうか？
 }
 
 
 static void on_ble_write(sl_bt_evt_gatt_server_attribute_value_t* p_evt) {
-  acp_service__evt_t evt = {
-      .conn_handle = p_evt->connection,
-      .evt_id = ACP_SERVICE_EVT__WRITE,
-      .params.gatts_evt.gatts_params.write.p_data = p_evt->value.data,
-      .params.gatts_evt.gatts_params.write.len = p_evt->value.len,
-  };
-  s_ble_stack__event_callback(&evt, NULL);
+  sl_status_t status = sl_bt_gatt_server_send_notification(
+      ch_connection,
+      ch_characteristic,
+      p_evt->value.len,
+      p_evt->value.data
+  );
 }
 
 /**************************************************************************//**
@@ -199,6 +249,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       break;
 
     case sl_bt_evt_connection_parameters_id:
+      //on_ble_connect_connection_params(&evt->data.evt_connection_parameters);
     break;
 
     case sl_bt_evt_gatt_server_attribute_value_id:
@@ -206,7 +257,9 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       break;
 
     case sl_bt_evt_gatt_server_characteristic_status_id:
-      on_ble_gatt_status(&evt->data.evt_gatt_server_characteristic_status);
+      ch_connection = evt->data.evt_gatt_server_characteristic_status.connection;
+      ch_characteristic = evt->data.evt_gatt_server_characteristic_status.characteristic;
+      //on_ble_gatt_status(&evt->data.evt_gatt_server_characteristic_status);
     break;
 
     // -------------------------------
